@@ -105,6 +105,70 @@ pipeline {
                 }
             }
         }
+        stage('Trivy OS Scan') {
+            steps {
+                script {
+                    // Generate table report
+                    sh """
+                        trivy image \
+                            --scanners vuln \
+                            --pkg-types os \
+                            --severity HIGH,MEDIUM \
+                            --format table \
+                            --output trivy-os-report.txt \
+                            --exit-code 0 \
+                            catalogue:latest
+                    """
+
+                    // Generate HTML report
+                    sh """
+                        trivy image \
+                            --scanners vuln \
+                            --pkg-types os \
+                            --severity HIGH,MEDIUM \
+                            --format template \
+                            --template "@/usr/local/share/trivy/templates/html.tpl" \
+                            --output trivy-os-report.html \
+                            --exit-code 0 \
+                            catalogue:latest
+                    """
+
+                    // Print table to console
+                    sh 'cat trivy-os-report.txt'
+
+                    // Publish HTML report
+                    publishHTML(target: [
+                        allowMissing          : false,
+                        alwaysLinkToLastBuild : true,
+                        keepAll               : true,
+                        reportDir             : '.',
+                        reportFiles           : 'trivy-os-report.html',
+                        reportName            : 'Trivy OS Vulnerability Report'
+                    ])
+
+                    // Check for vulnerabilities and fail if found
+                    def scanResult = sh(
+                        script: """
+                            trivy image \
+                                --scanners vuln \
+                                --pkg-types os \
+                                --severity HIGH,MEDIUM \
+                                --format table \
+                                --exit-code 1 \
+                                --quiet \
+                                catalogue:latest
+                        """,
+                        returnStatus: true
+                    )
+
+                    if (scanResult != 0) {
+                        error "🚨 Trivy found HIGH/MEDIUM OS vulnerabilities. Pipeline failed. Check the Trivy OS Vulnerability Report."
+                    } else {
+                        echo "✅ No HIGH or MEDIUM OS vulnerabilities found. Pipeline continues."
+                    }
+                }
+            }
+        }
         stage('Build Image') {
             steps {
                 sh "docker build -t ${ECR_REPO_NAME}:${appVersion} ."
