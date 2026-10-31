@@ -113,14 +113,17 @@ pipeline {
         stage('Trivy OS Scan') {
             steps {
                 script {
-                    // Download Trivy HTML template
+                    def imageName = "${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion}"
+
+                    // Download official Trivy HTML template
                     sh '''
                         curl -sfL \
-                            https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
-                            -o html.tpl
+                        https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+                        -o html.tpl
 
                         test -s html.tpl
                     '''
+
                     // Generate table report
                     sh """
                         trivy image \
@@ -130,7 +133,7 @@ pipeline {
                             --format table \
                             --output trivy-os-report.txt \
                             --exit-code 0 \
-                            ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion}
+                            ${imageName}
                     """
 
                     // Generate HTML report
@@ -140,16 +143,16 @@ pipeline {
                             --pkg-types os \
                             --severity HIGH,MEDIUM \
                             --format template \
-                            --template "@/usr/local/share/trivy/templates/html.tpl" \
+                            --template "@html.tpl" \
                             --output trivy-os-report.html \
                             --exit-code 0 \
-                            ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion}
+                            ${imageName}
                     """
 
-                    // Print table to console
+                    // Print scan results
                     sh 'cat trivy-os-report.txt'
 
-                    // Publish HTML report
+                    // Publish HTML report in Jenkins
                     publishHTML(target: [
                         allowMissing          : false,
                         alwaysLinkToLastBuild : true,
@@ -159,7 +162,7 @@ pipeline {
                         reportName            : 'Trivy OS Vulnerability Report'
                     ])
 
-                    // Check for vulnerabilities and fail if found
+                    // Fail pipeline if HIGH or MEDIUM vulnerabilities exist
                     def scanResult = sh(
                         script: """
                             trivy image \
@@ -169,15 +172,15 @@ pipeline {
                                 --format table \
                                 --exit-code 1 \
                                 --quiet \
-                                ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion}
+                                ${imageName}
                         """,
                         returnStatus: true
                     )
 
                     if (scanResult != 0) {
-                        error "🚨 Trivy found HIGH/MEDIUM OS vulnerabilities. Pipeline failed. Check the Trivy OS Vulnerability Report."
+                        error "Trivy found HIGH/MEDIUM OS vulnerabilities. Pipeline failed. Check the Trivy OS Vulnerability Report."
                     } else {
-                        echo "✅ No HIGH or MEDIUM OS vulnerabilities found. Pipeline continues."
+                        echo "No HIGH or MEDIUM OS vulnerabilities found. Pipeline continues."
                     }
                 }
             }
