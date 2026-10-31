@@ -107,7 +107,7 @@ pipeline {
         }
         stage('Build Image') {
             steps {
-                sh "docker build -t ${ECR_REPO_NAME}:${appVersion} ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion} ."
+                sh "docker build -t ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion} ."
             }
         }
         stage('Trivy OS Scan') {
