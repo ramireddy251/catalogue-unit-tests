@@ -5,13 +5,15 @@ instana({
     tracing: {
         enabled: true
     }
-});
+}); 
+// some change
+// some changes, few more changes
 const { MongoClient, ObjectId } = require('mongodb');
 const bodyParser = require('body-parser');
 const express = require('express');
-const crypto = require('crypto'); // Fix: Added native crypto package for cryptographically secure compliance
 const pino = require('pino');
 const expPino = require('express-pino-logger');
+
 const logger = pino({
     level: 'info',
     prettyPrint: false,
@@ -20,21 +22,22 @@ const logger = pino({
 const expLogger = expPino({
     logger: logger
 });
+
 // MongoDB
 let db;
 let collection;
 let mongoConnected = false;
 
 const app = express();
-// Fix 1: Disables framework version disclosure signature (x-powered-by header)
-app.disable('x-powered-by'); 
 
 app.use(expLogger);
+
 app.use((req, res, next) => {
     res.set('Timing-Allow-Origin', '*');
     res.set('Access-Control-Allow-Origin', '*');
     next();
 });
+
 app.use((req, res, next) => {
     let dcs = [
         "asia-northeast2",
@@ -44,24 +47,22 @@ app.use((req, res, next) => {
         "us-west1"
     ];
     let span = instana.currentSpan();
-    
-    // Fix 2: Replaced Math.random() with a cryptographically compliant secure random alternative
-    const randomArray = new Uint32Array(1);
-    crypto.getRandomValues(randomArray);
-    const randomIndex = randomArray[0] % dcs.length;
-    
-    span.annotate('custom.sdk.tags.datacenter', dcs[randomIndex]);
+    span.annotate('custom.sdk.tags.datacenter', dcs[Math.floor(Math.random() * dcs.length)]);
+
     next();
 });
+
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
+
 app.get('/health', (req, res) => {
-    var stat = {
+    const stat = {
         app: 'OK',
         mongo: mongoConnected
     };
     res.json(stat);
 });
+
 // all products
 app.get('/products', (req, res) => {
     if (mongoConnected) {
@@ -76,6 +77,7 @@ app.get('/products', (req, res) => {
         res.status(500).send('database not available');
     }
 });
+
 // product by SKU
 app.get('/product/:sku', (req, res) => {
     if (mongoConnected) {
@@ -99,6 +101,7 @@ app.get('/product/:sku', (req, res) => {
         res.status(500).send('database not available');
     }
 });
+
 // products in a category
 app.get('/products/:cat', (req, res) => {
     if (mongoConnected) {
@@ -117,6 +120,7 @@ app.get('/products/:cat', (req, res) => {
         res.status(500).send('database not available');
     }
 });
+
 // all categories
 app.get('/categories', (req, res) => {
     if (mongoConnected) {
@@ -131,6 +135,7 @@ app.get('/categories', (req, res) => {
         res.status(500).send('database not available');
     }
 });
+
 // search name and description
 app.get('/search/:text', (req, res) => {
     if (mongoConnected) {
@@ -145,6 +150,7 @@ app.get('/search/:text', (req, res) => {
         res.status(500).send('database not available');
     }
 });
+
 // set up Mongo
 async function mongoConnect() {
     try {
@@ -160,6 +166,7 @@ async function mongoConnect() {
         setTimeout(mongoLoop, 2000);
     }
 }
+
 // mongodb connection retry loop
 function mongoLoop() {
     mongoConnect().catch((e) => {
@@ -167,9 +174,13 @@ function mongoLoop() {
         setTimeout(mongoLoop, 2000);
     });
 }
+
 mongoLoop();
+
 // fire it up!
 const port = process.env.CATALOGUE_SERVER_PORT || '8080';
 app.listen(port, () => {
     logger.info('Started on port', port);
 });
+
+module.exports = app;
