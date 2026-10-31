@@ -113,6 +113,14 @@ pipeline {
         stage('Trivy OS Scan') {
             steps {
                 script {
+                    // Download Trivy HTML template
+                    sh '''
+                        curl -sfL \
+                            https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+                            -o html.tpl
+
+                        test -s html.tpl
+                    '''
                     // Generate table report
                     sh """
                         trivy image \
@@ -161,7 +169,7 @@ pipeline {
                                 --format table \
                                 --exit-code 1 \
                                 --quiet \
-                                catalogue:latest
+                                ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion}
                         """,
                         returnStatus: true
                     )
