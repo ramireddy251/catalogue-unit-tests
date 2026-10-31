@@ -122,7 +122,7 @@ pipeline {
                             --format table \
                             --output trivy-os-report.txt \
                             --exit-code 0 \
-                            ${ECR_REPO_NAME}:${appVersion} ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion}
+                            ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion}
                     """
 
                     // Generate HTML report
@@ -135,7 +135,7 @@ pipeline {
                             --template "@/usr/local/share/trivy/templates/html.tpl" \
                             --output trivy-os-report.html \
                             --exit-code 0 \
-                            ${ECR_REPO_NAME}:${appVersion} ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion}
+                            ${ECR_REGISTRY}/${ECR_REPO_NAME}:${appVersion}
                     """
 
                     // Print table to console
