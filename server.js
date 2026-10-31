@@ -11,6 +11,7 @@ instana({
 const { MongoClient, ObjectId } = require('mongodb');
 const bodyParser = require('body-parser');
 const express = require('express');
+const crypto = require('crypto'); // FIX 1: Import native crypto module for secure random generation
 const pino = require('pino');
 const expPino = require('express-pino-logger');
 
@@ -30,6 +31,9 @@ let mongoConnected = false;
 
 const app = express();
 
+// FIX 2: Disable framework information disclosure (removes X-Powered-By header)
+app.disable('x-powered-by');
+
 app.use(expLogger);
 
 app.use((req, res, next) => {
@@ -47,7 +51,13 @@ app.use((req, res, next) => {
         "us-west1"
     ];
     let span = instana.currentSpan();
-    span.annotate('custom.sdk.tags.datacenter', dcs[Math.floor(Math.random() * dcs.length)]);
+    
+    // FIX 1: Replaced Math.random() with a cryptographically secure alternative to satisfy SonarQube
+    const randomBuffer = crypto.randomBytes(4);
+    const randomNumber = randomBuffer.readUInt32BE(0);
+    const randomIndex = randomNumber % dcs.length;
+    
+    span.annotate('custom.sdk.tags.datacenter', dcs[randomIndex]);
 
     next();
 });
