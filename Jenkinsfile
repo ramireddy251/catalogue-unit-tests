@@ -13,11 +13,11 @@ pipeline {
         AWS_ACCOUNT_ID = '104050870679'
         AWS_REGION = 'us-east-1'
         ECR_REPO_NAME = 'roboshop/catalogue'
-        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_REGISTRY = '104050870679.dkr.ecr.us-east-1.amazonaws.com'
     }
 
     options {
-        timeout(time: 60, unit: 'MINUTES')
+        timeout(time: 90, unit: 'MINUTES')
         timestamps()
     }
 
@@ -32,14 +32,14 @@ pipeline {
                     ).trim()
 
                     if (!version || version == 'undefined' || version == 'null') {
-                        error 'Unable to read application version from package.json'
+                        error 'Unable to read version from package.json'
                     }
 
                     env.APP_VERSION = version
-                    env.IMAGE_NAME = "${env.ECR_REGISTRY}/${env.ECR_REPO_NAME}:${env.APP_VERSION}"
 
-                    echo "Building version: ${env.APP_VERSION}"
-                    echo "Docker image: ${env.IMAGE_NAME}"
+                    echo "Application Version: ${version}"
+                    echo "ECR Registry: ${env.ECR_REGISTRY}"
+                    echo "ECR Repository: ${env.ECR_REPO_NAME}"
                 }
             }
         }
@@ -64,7 +64,7 @@ pipeline {
                     withSonarQubeEnv('sonar-server') {
                         sh """
                             ${scannerHome}/bin/sonar-scanner \
-                              -Dsonar.exclusions=**/node_modules/**,**/coverage/**,**/trivy-report.html,**/trivy-os-report.html,**/trivy-reports/**,**/reports/**
+                            '-Dsonar.exclusions=**/node_modules/**,**/coverage/**,**/trivy-report.html,**/trivy-os-report.html,**/trivy-reports/**,**/reports/**'
                         """
                     }
                 }
@@ -92,13 +92,13 @@ pipeline {
                         def repo = 'catalogue-unit-tests'
 
                         def response = sh(
-                            script: '''
+                            script: """
                                 curl -s -w "\\n%{http_code}" \
-                                  -H "Authorization: Bearer $GITHUB_TOKEN" \
-                                  -H "Accept: application/vnd.github+json" \
-                                  -H "X-GitHub-Api-Version: 2022-11-28" \
-                                  "https://api.github.com/repos/ramireddy251/catalogue-unit-tests/dependabot/alerts?severity=high,critical&state=open&per_page=100"
-                            ''',
+                                -H "Authorization: Bearer \$GITHUB_TOKEN" \
+                                -H "Accept: application/vnd.github+json" \
+                                -H "X-GitHub-Api-Version: 2022-11-28" \
+                                "https://api.github.com/repos/${owner}/${repo}/dependabot/alerts?severity=high,critical&state=open&per_page=100"
+                            """,
                             returnStdout: true
                         ).trim()
 
@@ -136,51 +136,94 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                sh '''
-                    echo "Building Docker image: $IMAGE_NAME"
-                    docker build --no-cache -t "$IMAGE_NAME" .
-                '''
+                script {
+                    // Read version again to avoid relying on a previous stage's variable
+                    def version = sh(
+                        script: "node -p \"require('./package.json').version || ''\"",
+                        returnStdout: true
+                    ).trim()
+
+                    if (!version || version == 'undefined' || version == 'null') {
+                        error 'APP_VERSION is empty. Cannot build Docker image.'
+                    }
+
+                    def imageName = "${env.ECR_REGISTRY}/${env.ECR_REPO_NAME}:${version}"
+
+                    env.APP_VERSION = version
+                    env.IMAGE_NAME = imageName
+
+                    echo "Application Version: ${version}"
+                    echo "Building Docker Image: ${imageName}"
+
+                    sh """
+                        docker build --no-cache -t '${imageName}' .
+                    """
+
+                    echo "Docker image built successfully: ${imageName}"
+                }
             }
         }
 
         stage('Trivy OS Scan') {
             steps {
                 script {
+                    // Reconstruct and validate image name
+                    def version = env.APP_VERSION?.trim()
+
+                    if (!version) {
+                        version = sh(
+                            script: "node -p \"require('./package.json').version || ''\"",
+                            returnStdout: true
+                        ).trim()
+                    }
+
+                    if (!version || version == 'undefined' || version == 'null') {
+                        error 'Cannot run Trivy: application version is missing.'
+                    }
+
+                    def imageName = "${env.ECR_REGISTRY}/${env.ECR_REPO_NAME}:${version}"
+
+                    env.APP_VERSION = version
+                    env.IMAGE_NAME = imageName
+
+                    echo "Scanning Docker Image: ${imageName}"
+
                     sh '''
                         curl -sfL \
-                          https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
-                          -o html.tpl
+                        https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+                        -o html.tpl
 
                         test -s html.tpl
                     '''
 
                     // Generate text report
-                    sh '''
+                    sh """
                         trivy image \
-                          --scanners vuln \
-                          --pkg-types os \
-                          --severity HIGH,MEDIUM \
-                          --format table \
-                          --output trivy-os-report.txt \
-                          --exit-code 0 \
-                          "$IMAGE_NAME"
-                    '''
+                            --scanners vuln \
+                            --pkg-types os \
+                            --severity HIGH,MEDIUM \
+                            --format table \
+                            --output trivy-os-report.txt \
+                            --exit-code 0 \
+                            '${imageName}'
+                    """
 
                     // Generate HTML report
-                    sh '''
+                    sh """
                         trivy image \
-                          --scanners vuln \
-                          --pkg-types os \
-                          --severity HIGH,MEDIUM \
-                          --format template \
-                          --template "@html.tpl" \
-                          --output trivy-os-report.html \
-                          --exit-code 0 \
-                          "$IMAGE_NAME"
-                    '''
+                            --scanners vuln \
+                            --pkg-types os \
+                            --severity HIGH,MEDIUM \
+                            --format template \
+                            --template "@html.tpl" \
+                            --output trivy-os-report.html \
+                            --exit-code 0 \
+                            '${imageName}'
+                    """
 
                     sh 'cat trivy-os-report.txt'
 
+                    // Publish HTML report
                     publishHTML(target: [
                         allowMissing: false,
                         alwaysLinkToLastBuild: true,
@@ -190,17 +233,17 @@ pipeline {
                         reportName: 'Trivy OS Vulnerability Report'
                     ])
 
-                    // Fail if HIGH or MEDIUM OS vulnerabilities exist
+                    // Fail pipeline if HIGH or MEDIUM vulnerabilities exist
                     def scanResult = sh(
-                        script: '''
+                        script: """
                             trivy image \
-                              --scanners vuln \
-                              --pkg-types os \
-                              --severity HIGH,MEDIUM \
-                              --exit-code 1 \
-                              --quiet \
-                              "$IMAGE_NAME"
-                        ''',
+                                --scanners vuln \
+                                --pkg-types os \
+                                --severity HIGH,MEDIUM \
+                                --exit-code 1 \
+                                --quiet \
+                                '${imageName}'
+                        """,
                         returnStatus: true
                     )
 
@@ -215,17 +258,36 @@ pipeline {
 
         stage('Push to ECR') {
             steps {
-                sh '''
-                    echo "Logging in to AWS ECR..."
+                script {
+                    // Reconstruct and validate image name
+                    def version = env.APP_VERSION?.trim()
 
-                    aws ecr get-login-password --region "$AWS_REGION" |
-                      docker login \
-                        --username AWS \
-                        --password-stdin "$ECR_REGISTRY"
+                    if (!version) {
+                        version = sh(
+                            script: "node -p \"require('./package.json').version || ''\"",
+                            returnStdout: true
+                        ).trim()
+                    }
 
-                    echo "Pushing image: $IMAGE_NAME"
-                    docker push "$IMAGE_NAME"
-                '''
+                    if (!version || version == 'undefined' || version == 'null') {
+                        error 'Cannot push image: application version is missing.'
+                    }
+
+                    def imageName = "${env.ECR_REGISTRY}/${env.ECR_REPO_NAME}:${version}"
+
+                    echo "Pushing Docker Image: ${imageName}"
+
+                    sh """
+                        aws ecr get-login-password --region '${env.AWS_REGION}' |
+                        docker login \
+                            --username AWS \
+                            --password-stdin '${env.ECR_REGISTRY}'
+
+                        docker push '${imageName}'
+                    """
+
+                    echo "Image pushed successfully: ${imageName}"
+                }
             }
         }
     }
@@ -240,7 +302,7 @@ pipeline {
         }
 
         failure {
-            echo 'Pipeline FAILURE. Please check the stage logs.'
+            echo 'Pipeline FAILURE. Check the failed stage logs.'
         }
     }
 }
