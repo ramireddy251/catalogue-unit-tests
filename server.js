@@ -1,314 +1,271 @@
 
-const instana = require('@instana/collector');
+'use strict';
 
-// Initialize Instana before loading other application modules
-instana({
-    tracing: {
-        enabled: true
-    }
-});
-
-const { MongoClient } = require('mongodb');
-const bodyParser = require('body-parser');
 const express = require('express');
+const { MongoClient } = require('mongodb');
 const crypto = require('crypto');
 const pino = require('pino');
-const expPino = require('express-pino-logger');
 
-const logger = pino({
-    level: 'info'
-});
-
-const expLogger = expPino({
-    logger
-});
-
-// MongoDB configuration
-const mongoURL =
-    process.env.MONGO_URL || 'mongodb://mongodb:27017/catalogue';
+// Instana instrumentation
+const instana = require('@instana/collector');
+instana();
 
 const app = express();
+const logger = pino();
 
-let db;
-let collection;
+// Configuration
+const PORT = process.env.CATALOGUE_SERVER_PORT || 8080;
+
+const mongoURL =
+    process.env.MONGO_URL ||
+    process.env.MONGO ||
+    'mongodb://mongodb:27017/catalogue';
+
+const databaseName = process.env.MONGO_DATABASE || 'catalogue';
+const collectionName = process.env.MONGO_COLLECTION || 'products';
+
+const mongoOptions = {
+    serverSelectionTimeoutMS: 5000,
+    connectTimeoutMS: 10000
+};
+
+// MongoDB state
 let mongoConnected = false;
-let mongoRetryTimer;
-let mongoClient;
-
-let isConnecting = false;
-
-// Disable Express framework information disclosure
-app.disable('x-powered-by');
+let productsCollection = null;
 
 // Middleware
-app.use(expLogger);
+app.disable('x-powered-by');
+app.use(express.json());
 
+// Request logging and Instana tracing
 app.use((req, res, next) => {
-    res.set('Timing-Allow-Origin', '*');
-    res.set('Access-Control-Allow-Origin', '*');
-    next();
-});
+    const datacenter = crypto.randomInt(1, 4);
 
-// Instana datacenter annotation
-app.use((req, res, next) => {
-    const dcs = [
-        'asia-northeast2',
-        'asia-south1',
-        'europe-west3',
-        'us-east1',
-        'us-west1'
-    ];
+    try {
+        const span = instana.currentSpan();
 
-    const span = instana.currentSpan();
-
-    const randomIndex = crypto.randomInt(0, dcs.length);
-
-    if (span && typeof span.annotate === 'function') {
-        span.annotate(
-            'custom.sdk.tags.datacenter',
-            dcs[randomIndex]
-        );
+        if (span && typeof span.annotate === 'function') {
+            span.annotate('datacenter', datacenter);
+            span.annotate('http.method', req.method);
+            span.annotate('http.url', req.originalUrl);
+        }
+    } catch (error) {
+        logger.warn({ error: error.message }, 'Instana annotation failed');
     }
+
+    logger.info({
+        method: req.method,
+        url: req.originalUrl,
+        datacenter
+    }, 'Incoming request');
 
     next();
-});
-
-// Request body parsing
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
-
-// Generic API error handler
-function handleDatabaseError(req, res, error, message) {
-    req.log.error({ err: error }, message);
-
-    if (!res.headersSent) {
-        res.status(500).json({
-            error: 'Internal server error'
-        });
-    }
-}
-
-// Health check
-app.get('/health', (req, res) => {
-    res.json({
-        app: 'OK',
-        mongo: mongoConnected
-    });
-});
-
-// Get all products
-app.get('/products', async (req, res) => {
-    if (!mongoConnected) {
-        req.log.error('Database not available');
-
-        return res.status(500).json({
-            error: 'Database not available'
-        });
-    }
-
-    try {
-        const products = await collection.find({}).toArray();
-        res.json(products);
-    } catch (error) {
-        handleDatabaseError(
-            req,
-            res,
-            error,
-            'Failed to retrieve products'
-        );
-    }
-});
-
-// Get product by SKU
-app.get('/product/:sku', async (req, res) => {
-    if (!mongoConnected) {
-        req.log.error('Database not available');
-
-        return res.status(500).json({
-            error: 'Database not available'
-        });
-    }
-
-    try {
-        const delay = Number(process.env.GO_SLOW) || 0;
-
-        if (delay > 0) {
-            await new Promise(resolve => setTimeout(resolve, delay));
-        }
-
-        const product = await collection.findOne({
-            sku: req.params.sku
-        });
-
-        if (product) {
-            req.log.info({ sku: req.params.sku }, 'Product found');
-            return res.json(product);
-        }
-
-        return res.status(404).send('SKU not found');
-    } catch (error) {
-        handleDatabaseError(
-            req,
-            res,
-            error,
-            'Failed to retrieve product by SKU'
-        );
-    }
-});
-
-// Get products by category
-app.get('/products/:cat', async (req, res) => {
-    if (!mongoConnected) {
-        req.log.error('Database not available');
-
-        return res.status(500).json({
-            error: 'Database not available'
-        });
-    }
-
-    try {
-        const products = await collection.find({
-            categories: req.params.cat
-        }).sort({
-            name: 1
-        }).toArray();
-
-        if (products.length > 0) {
-            return res.json(products);
-        }
-
-        return res.status(404).send(
-            'No products for ' + req.params.cat
-        );
-    } catch (error) {
-        handleDatabaseError(
-            req,
-            res,
-            error,
-            'Failed to retrieve products by category'
-        );
-    }
-});
-
-// Get all categories
-app.get('/categories', async (req, res) => {
-    if (!mongoConnected) {
-        req.log.error('Database not available');
-
-        return res.status(500).json({
-            error: 'Database not available'
-        });
-    }
-
-    try {
-        const categories = await collection.distinct('categories');
-        res.json(categories);
-    } catch (error) {
-        handleDatabaseError(
-            req,
-            res,
-            error,
-            'Failed to retrieve categories'
-        );
-    }
-});
-
-// Search products by name and description
-app.get('/search/:text', async (req, res) => {
-    if (!mongoConnected) {
-        req.log.error('Database not available');
-
-        return res.status(500).json({
-            error: 'Database not available'
-        });
-    }
-
-    try {
-        const hits = await collection.find({
-            $text: {
-                $search: req.params.text
-            }
-        }).toArray();
-
-        res.json(hits);
-    } catch (error) {
-        handleDatabaseError(
-            req,
-            res,
-            error,
-            'Failed to search products'
-        );
-    }
 });
 
 // MongoDB connection
 async function mongoConnect() {
-    if (isConnecting || mongoConnected) {
-        return;
-    }
-
-    isConnecting = true;
-
     try {
-        const client = new MongoClient(mongoURL, {
-            serverSelectionTimeoutMS: 5000,
-            connectTimeoutMS: 10000
-        });
+        const client = await MongoClient.connect(mongoURL, mongoOptions);
 
-        await client.connect();
+        const db = client.db(databaseName);
 
-        mongoClient = client;
-        db = client.db('catalogue');
-        collection = db.collection('products');
-
+        productsCollection = db.collection(collectionName);
         mongoConnected = true;
 
-        logger.info('MongoDB connected');
+        logger.info('MongoDB connected successfully');
 
-        client.on('close', () => {
-            mongoConnected = false;
-            logger.error('MongoDB connection closed');
-            scheduleMongoRetry();
-        });
-
-        client.on('error', error => {
-            logger.error({ err: error }, 'MongoDB connection error');
-        });
-
+        return true;
     } catch (error) {
         mongoConnected = false;
+        productsCollection = null;
 
-        logger.error(
-            { err: error },
-            'MongoDB connection failed'
-        );
+        logger.error({
+            error: error.message
+        }, 'MongoDB connection failed');
 
-        scheduleMongoRetry();
-    } finally {
-        isConnecting = false;
+        return false;
     }
 }
 
-// MongoDB retry scheduling
-function scheduleMongoRetry() {
-    if (mongoRetryTimer || mongoConnected) {
-        return;
-    }
+// Start MongoDB connection without blocking application startup
+const mongoConnectionPromise = mongoConnect();
 
-    mongoRetryTimer = setTimeout(() => {
-        mongoRetryTimer = null;
-        mongoConnect();
-    }, 2000);
-}
-
-// Start MongoDB connection
-mongoConnect();
-
-// Start Express server
-const port = process.env.CATALOGUE_SERVER_PORT || 8080;
-
-app.listen(port, () => {
-    logger.info({ port }, 'Catalogue service started');
+// Health check
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        app: 'OK',
+        mongo: mongoConnected ? 'CONNECTED' : 'DISCONNECTED'
+    });
 });
 
+// GET all products
+app.get('/products', async (req, res) => {
+    try {
+        if (!mongoConnected || !productsCollection) {
+            return res.status(500).json({
+                message: 'MongoDB is not connected'
+            });
+        }
+
+        const products = await productsCollection.find({}).toArray();
+
+        return res.status(200).json(products);
+    } catch (error) {
+        logger.error({
+            error: error.message
+        }, 'Failed to fetch products');
+
+        return res.status(500).json({
+            message: 'Unable to fetch products'
+        });
+    }
+});
+
+// GET products by category
+app.get('/products/:cat', async (req, res) => {
+    try {
+        if (!mongoConnected || !productsCollection) {
+            return res.status(500).json({
+                message: 'MongoDB is not connected'
+            });
+        }
+
+        const category = req.params.cat;
+
+        const products = await productsCollection
+            .find({ categories: category })
+            .toArray();
+
+        return res.status(200).json(products);
+    } catch (error) {
+        logger.error({
+            error: error.message
+        }, 'Failed to fetch products by category');
+
+        return res.status(500).json({
+            message: 'Unable to fetch products by category'
+        });
+    }
+});
+
+// GET product by SKU
+app.get('/product/:sku', async (req, res) => {
+    try {
+        if (!mongoConnected || !productsCollection) {
+            return res.status(500).json({
+                message: 'MongoDB is not connected'
+            });
+        }
+
+        const sku = req.params.sku;
+
+        const product = await productsCollection.findOne({
+            sku: sku
+        });
+
+        if (!product) {
+            return res.status(404).json({
+                message: 'Product not found'
+            });
+        }
+
+        return res.status(200).json(product);
+    } catch (error) {
+        logger.error({
+            error: error.message
+        }, 'Failed to fetch product by SKU');
+
+        return res.status(500).json({
+            message: 'Unable to fetch product'
+        });
+    }
+});
+
+// GET all categories
+app.get('/categories', async (req, res) => {
+    try {
+        if (!mongoConnected || !productsCollection) {
+            return res.status(500).json({
+                message: 'MongoDB is not connected'
+            });
+        }
+
+        const categories = await productsCollection.distinct('categories');
+
+        return res.status(200).json(categories);
+    } catch (error) {
+        logger.error({
+            error: error.message
+        }, 'Failed to fetch categories');
+
+        return res.status(500).json({
+            message: 'Unable to fetch categories'
+        });
+    }
+});
+
+// GET products by search text
+app.get('/search/:text', async (req, res) => {
+    try {
+        if (!mongoConnected || !productsCollection) {
+            return res.status(500).json({
+                message: 'MongoDB is not connected'
+            });
+        }
+
+        const searchText = req.params.text;
+
+        // Escape special regular-expression characters
+        const escapedText = searchText.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            '\\$&'
+        );
+
+        const products = await productsCollection
+            .find({
+                name: {
+                    $regex: escapedText,
+                    $options: 'i'
+                }
+            })
+            .toArray();
+
+        return res.status(200).json(products);
+    } catch (error) {
+        logger.error({
+            error: error.message
+        }, 'Product search failed');
+
+        return res.status(500).json({
+            message: 'Unable to search products'
+        });
+    }
+});
+
+// Handle unknown routes
+app.use((req, res) => {
+    res.status(404).json({
+        message: 'Route not found'
+    });
+});
+
+// Handle unexpected errors
+app.use((error, req, res, next) => {
+    logger.error({
+        error: error.message
+    }, 'Unhandled application error');
+
+    res.status(500).json({
+        message: 'Internal server error'
+    });
+});
+
+// Start server only when executed directly
+if (require.main === module) {
+    app.listen(PORT, () => {
+        logger.info(`Catalogue service listening on port ${PORT}`);
+    });
+}
+
+// Export app for Jest and Supertest
 module.exports = app;
